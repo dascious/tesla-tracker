@@ -1,0 +1,18 @@
+services:
+  tesla-tracker:
+    build: .
+    container_name: tesla-tracker
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./.env:/app/.env:ro
+    environment:
+      - WEB_PORT=8080
+      - BASE_PATH=/tesla
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

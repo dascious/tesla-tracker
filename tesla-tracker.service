@@ -1,0 +1,15 @@
+[Unit]
+Description=Tesla Inventory Tracker
+After=network.target
+
+[Service]
+Type=simple
+User=tesla-tracker
+WorkingDirectory=/opt/tesla-tracker
+ExecStart=/opt/tesla-tracker/venv/bin/python main.py
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/tesla-tracker/.env
+
+[Install]
+WantedBy=multi-user.target

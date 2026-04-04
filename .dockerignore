@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.log
+data/
+.env
+.git/
+com.eshanb.tesla-tracker.plist
+tesla-tracker.service
+setup-vps.sh
