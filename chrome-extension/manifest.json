@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Tesla Inventory Tracker",
+  "version": "1.0",
+  "description": "Scrapes Tesla AU inventory every 5 min and pushes to your dashboard",
+  "permissions": [
+    "alarms",
+    "tabs",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.tesla.com/*",
+    "http://db.bhide.au/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tesla Tracker"
+  }
+}
