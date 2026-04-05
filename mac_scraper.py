@@ -3,8 +3,6 @@ Mac Mini scraper using Playwright.
 Navigates to Tesla's inventory page (passing Cloudflare JS challenges),
 intercepts the API response, then pushes results to the VPS.
 
-Runs headlessly — no visible window.
-
 Run manually:   python3 mac_scraper.py
 Scheduled via:  com.eshanb.tesla-scraper.plist (every 5 min)
 """
@@ -12,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import sys
 import urllib.request
 from urllib.parse import quote
@@ -59,20 +58,82 @@ def build_query(model: str, condition: str) -> dict:
     }
 
 
-async def scrape_all() -> dict:
+async def fetch_one(context, model: str, condition: str) -> list | None:
     """
-    Launches a headless browser, navigates to each inventory page,
-    intercepts the API JSON response. Returns {(model, condition): [vehicles]}.
+    Opens one page, navigates to the Tesla inventory page,
+    intercepts the inventory API response. Returns list of vehicle dicts or None.
     """
-    results = {}
+    page = await context.new_page()
+    captured = {}   # use dict so the closure can mutate it
 
-    # Persist browser state (cookies, localStorage) between runs.
-    # First run may get blocked; subsequent runs reuse the established session.
+    async def handle_response(response):
+        if "/inventory/api/" in response.url and "inventory-results" in response.url:
+            try:
+                if response.status == 200:
+                    data = await response.json()
+                    captured["data"] = data
+                    results = data.get("results", [])
+                    logger.info(
+                        f"[{model}/{condition}] Intercepted: {len(results)} results "
+                        f"(total: {data.get('total_matches_found', 0)})"
+                    )
+            except Exception as e:
+                logger.error(f"[{model}/{condition}] Response parse error: {e}")
+
+    page.on("response", handle_response)
+
+    url = (f"https://www.tesla.com/en_AU/inventory/{condition}/{model}"
+           f"?arrangeby=plh&zip={ZIP_CODE}&range=0")
+    try:
+        logger.info(f"[{model}/{condition}] Loading {url}")
+        await page.goto(url, wait_until="networkidle", timeout=45000)
+        await asyncio.sleep(2)
+
+        if "data" not in captured:
+            # Fallback: fetch from within the page's browser context
+            logger.info(f"[{model}/{condition}] No intercept — trying in-page fetch")
+            query_str = quote(json.dumps(build_query(model, condition), separators=(",", ":")))
+            api_url = f"{TESLA_API_URL}?query={query_str}"
+            raw = await page.evaluate(f"""
+                async () => {{
+                    const r = await fetch("{api_url}");
+                    return await r.text();
+                }}
+            """)
+            try:
+                captured["data"] = json.loads(raw)
+                results = captured["data"].get("results", []) if isinstance(captured["data"], dict) else []
+                logger.info(f"[{model}/{condition}] In-page fetch: {len(results)} results")
+            except Exception:
+                logger.error(f"[{model}/{condition}] Non-JSON response: {raw[:150]}")
+                return None
+
+        data = captured.get("data")
+        if not isinstance(data, dict):
+            logger.error(f"[{model}/{condition}] Unexpected data type: {type(data)}")
+            return None
+
+        vehicles = data.get("results", [])
+        # Guard: ensure results is actually a list of dicts
+        if not isinstance(vehicles, list):
+            logger.error(f"[{model}/{condition}] results field is not a list: {type(vehicles)}")
+            return None
+
+        vehicles = [v for v in vehicles if isinstance(v, dict)]
+        logger.info(f"[{model}/{condition}] {len(vehicles)} valid vehicle dicts")
+        return vehicles
+
+    except Exception as e:
+        logger.error(f"[{model}/{condition}] Page error: {e}")
+        return None
+    finally:
+        await page.close()
+
+
+async def scrape_all() -> dict:
     state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_state.json")
 
     async with async_playwright() as pw:
-        # headless=False is required — Tesla detects and blocks headless Chromium.
-        # The window appears briefly (~30s) every 5 minutes then closes automatically.
         browser = await pw.chromium.launch(
             headless=False,
             args=["--disable-blink-features=AutomationControlled"],
@@ -92,68 +153,21 @@ async def scrape_all() -> dict:
             "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
         )
 
+        results = {}
         for model in MODELS:
             for condition in CONDITIONS:
-                page = await context.new_page()
-                api_data = None
+                vehicles = await fetch_one(context, model, condition)
+                results[(model, condition)] = vehicles
+                # Human-like delay between page loads — reduces bot detection risk
+                delay = random.uniform(4.0, 8.0)
+                logger.info(f"Waiting {delay:.1f}s before next page...")
+                await asyncio.sleep(delay)
 
-                async def handle_response(response):
-                    nonlocal api_data
-                    if "/inventory/api/" in response.url and "inventory-results" in response.url:
-                        try:
-                            if response.status == 200:
-                                api_data = await response.json()
-                                logger.info(
-                                    f"[{model}/{condition}] Intercepted API: "
-                                    f"{len(api_data.get('results', []))} results "
-                                    f"(total: {api_data.get('total_matches_found', 0)})"
-                                )
-                        except Exception as e:
-                            logger.error(f"[{model}/{condition}] JSON parse error: {e}")
-
-                page.on("response", handle_response)
-
-                url = (f"https://www.tesla.com/en_AU/inventory/{condition}/{model}"
-                       f"?arrangeby=plh&zip={ZIP_CODE}&range=0")
-                try:
-                    logger.info(f"[{model}/{condition}] Loading {url}")
-                    await page.goto(url, wait_until="networkidle", timeout=45000)
-                    await asyncio.sleep(2)
-
-                    if api_data is None:
-                        # Fallback: fetch from within page context (has cookies + session)
-                        logger.info(f"[{model}/{condition}] No intercept, trying in-page fetch")
-                        query_str = quote(json.dumps(build_query(model, condition), separators=(",", ":")))
-                        api_url = f"{TESLA_API_URL}?query={query_str}"
-                        raw = await page.evaluate(f"""
-                            async () => {{
-                                const r = await fetch("{api_url}");
-                                const t = await r.text();
-                                return t;
-                            }}
-                        """)
-                        try:
-                            api_data = json.loads(raw)
-                        except Exception:
-                            logger.error(f"[{model}/{condition}] Fallback returned non-JSON: {raw[:120]}")
-
-                    if api_data:
-                        results[(model, condition)] = api_data.get("results", [])
-                    else:
-                        results[(model, condition)] = None
-
-                except Exception as e:
-                    logger.error(f"[{model}/{condition}] Page error: {e}")
-                    results[(model, condition)] = None
-                finally:
-                    await page.close()
-
-        # Save cookies/session for next run
         try:
             await context.storage_state(path=state_file)
-            logger.info(f"Browser state saved to {state_file}")
+            logger.info(f"Session saved → {state_file}")
         except Exception as e:
-            logger.warning(f"Could not save browser state: {e}")
+            logger.warning(f"Could not save session: {e}")
 
         await browser.close()
 
@@ -161,7 +175,7 @@ async def scrape_all() -> dict:
 
 
 def push_to_vps(model: str, condition: str, vehicles: list):
-    active_vins = [v.get("VIN", "") for v in vehicles if v.get("VIN")]
+    active_vins = [v["VIN"] for v in vehicles if v.get("VIN")]
     payload = json.dumps({
         "model": model,
         "condition": condition,
@@ -180,21 +194,24 @@ def push_to_vps(model: str, condition: str, vehicles: list):
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         body = json.loads(resp.read())
-        logger.info(f"[{model}/{condition}] VPS: {body}")
+        logger.info(f"[{model}/{condition}] VPS ack: {body}")
 
 
 async def main():
     try:
         all_results = await scrape_all()
     except Exception as e:
-        logger.error(f"Scrape failed: {e}")
+        logger.error(f"Scrape session failed: {e}")
         sys.exit(1)
 
     errors = 0
     for (model, condition), vehicles in all_results.items():
         if vehicles is None:
+            logger.warning(f"[{model}/{condition}] Skipping — no data")
             errors += 1
             continue
+        if len(vehicles) == 0:
+            logger.info(f"[{model}/{condition}] No inventory found, pushing empty list to mark all gone")
         try:
             push_to_vps(model, condition, vehicles)
         except Exception as e:
@@ -202,7 +219,10 @@ async def main():
             errors += 1
 
     if errors == len(MODELS) * len(CONDITIONS):
+        logger.error("All scrapes failed")
         sys.exit(1)
+    else:
+        logger.info(f"Done. {len(MODELS) * len(CONDITIONS) - errors}/{len(MODELS) * len(CONDITIONS)} succeeded.")
 
 
 if __name__ == "__main__":
