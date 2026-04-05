@@ -62,7 +62,7 @@ async def fetch_inventory(model: str, condition: str) -> list[dict]:
 
     proxy = config.PROXY_URL or None
 
-    async with AsyncSession(impersonate="chrome125") as session:
+    async with AsyncSession(impersonate="chrome110") as session:
         response = await session.get(
             url,
             headers=headers,
