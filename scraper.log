@@ -1,0 +1,4 @@
+2026-04-05 18:14:19 ERROR: [my/new] Error: No module named 'curl_cffi'
+2026-04-05 18:14:21 ERROR: [my/used] Error: No module named 'curl_cffi'
+2026-04-05 18:14:24 ERROR: [m3/new] Error: No module named 'curl_cffi'
+2026-04-05 18:14:26 ERROR: [m3/used] Error: No module named 'curl_cffi'

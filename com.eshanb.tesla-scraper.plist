@@ -19,7 +19,7 @@
         <key>VPS_INGEST_URL</key>
         <string>http://db.bhide.au:8080/tesla/api/ingest</string>
         <key>INGEST_TOKEN</key>
-        <string>REPLACE_WITH_YOUR_TOKEN</string>
+        <string>edba657f94174221503e1b9fcf9702f7a3c298ff2f5012b0ab8f5ea5ed6e1688</string>
         <key>TESLA_ZIP</key>
         <string>2759</string>
         <key>TESLA_MARKET</key>

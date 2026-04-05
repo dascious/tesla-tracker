@@ -2,6 +2,9 @@
 Mac Mini scraper — runs on your residential IP, pushes results to VPS.
 No web server, no database. Just scrape + POST.
 
+Uses curl-cffi with a warm-up page visit to establish session cookies
+before hitting the Tesla inventory API.
+
 Run manually:   python3 mac_scraper.py
 Runs via cron:  see com.eshanb.tesla-scraper.plist
 """
@@ -10,10 +13,13 @@ import logging
 import os
 import random
 import sys
+import time
 from urllib.parse import quote
 
-# ── Minimal config (reads from env or defaults) ──────────────
-VPS_URL = os.getenv("VPS_INGEST_URL", "http://db.bhide.au:8080/tesla/api/ingest")
+from curl_cffi.requests import Session
+
+# ── Config (reads from env or defaults) ──────────────────────
+VPS_INGEST_URL = os.getenv("VPS_INGEST_URL", "http://db.bhide.au:8080/tesla/api/ingest")
 INGEST_TOKEN = os.getenv("INGEST_TOKEN", "")
 MARKET = os.getenv("TESLA_MARKET", "AU")
 LANGUAGE = os.getenv("TESLA_LANGUAGE", "en")
@@ -53,39 +59,79 @@ def build_query(model: str, condition: str) -> dict:
     }
 
 
-def fetch_inventory(model: str, condition: str) -> list[dict]:
-    from curl_cffi.requests import Session
-
-    query_str = quote(json.dumps(build_query(model, condition), separators=(",", ":")))
-    url = f"{TESLA_API_URL}?query={query_str}"
-
-    headers = {
-        "Accept": "application/json",
-        "Accept-Language": "en-AU,en;q=0.9",
-        "Referer": f"https://www.tesla.com/en_AU/inventory/{condition}/{model}",
-        "sec-ch-ua": '"Chromium";v="125", "Google Chrome";v="125", "Not.A/Brand";v="24"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-    }
+def scrape_all() -> dict[tuple, list]:
+    """
+    Opens one persistent session, warms it up with a real page visit,
+    then fetches all model/condition combos. Returns {(model, condition): [vehicles]}.
+    """
+    results = {}
 
     with Session(impersonate="chrome110") as session:
-        response = session.get(url, headers=headers, timeout=30)
 
-    if response.status_code != 200:
-        raise Exception(f"Tesla API returned HTTP {response.status_code}")
+        # Warm up: visit the inventory page as a real browser would.
+        # This sets cookies and passes bot checks before we hit the API.
+        warmup_url = f"https://www.tesla.com/en_AU/inventory/new/my?arrangeby=plh&zip={ZIP_CODE}&range=0"
+        logger.info(f"Warming up session via {warmup_url}")
+        warmup = session.get(
+            warmup_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-AU,en;q=0.9",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+            },
+            timeout=30,
+        )
+        logger.info(f"Warmup response: HTTP {warmup.status_code} "
+                    f"(cookies: {len(session.cookies)})")
 
-    content_type = response.headers.get("content-type", "")
-    if "json" not in content_type:
-        preview = response.text[:120].replace("\n", " ")
-        raise Exception(f"Got non-JSON response: {preview}")
+        if warmup.status_code not in (200, 304):
+            raise Exception(f"Warmup failed with HTTP {warmup.status_code}")
 
-    data = response.json()
-    results = data.get("results", [])
-    logger.info(f"[{model}/{condition}] Tesla API: {len(results)} results "
-                f"(total: {data.get('total_matches_found', 0)})")
+        # Small pause like a real user would have
+        time.sleep(random.uniform(1.5, 3.0))
+
+        # Now hit the API with the established session
+        for model in MODELS:
+            for condition in CONDITIONS:
+                try:
+                    query_str = quote(json.dumps(build_query(model, condition), separators=(",", ":")))
+                    url = f"{TESLA_API_URL}?query={query_str}"
+
+                    resp = session.get(
+                        url,
+                        headers={
+                            "Accept": "application/json",
+                            "Accept-Language": "en-AU,en;q=0.9",
+                            "Referer": f"https://www.tesla.com/en_AU/inventory/{condition}/{model}",
+                            "Sec-Fetch-Dest": "empty",
+                            "Sec-Fetch-Mode": "cors",
+                            "Sec-Fetch-Site": "same-origin",
+                        },
+                        timeout=30,
+                    )
+
+                    if resp.status_code != 200:
+                        raise Exception(f"HTTP {resp.status_code}")
+
+                    content_type = resp.headers.get("content-type", "")
+                    if "json" not in content_type:
+                        preview = resp.text[:120].replace("\n", " ")
+                        raise Exception(f"Got HTML instead of JSON: {preview}")
+
+                    data = resp.json()
+                    vehicles = data.get("results", [])
+                    total = data.get("total_matches_found", 0)
+                    logger.info(f"[{model}/{condition}] {len(vehicles)} results (total: {total})")
+                    results[(model, condition)] = vehicles
+
+                except Exception as e:
+                    logger.error(f"[{model}/{condition}] Fetch error: {e}")
+                    results[(model, condition)] = None
+
+                time.sleep(random.uniform(1.5, 3.5))
+
     return results
 
 
@@ -101,7 +147,7 @@ def push_to_vps(model: str, condition: str, vehicles: list[dict]):
     }).encode()
 
     req = urllib.request.Request(
-        VPS_URL,
+        VPS_INGEST_URL,
         data=payload,
         headers={
             "Content-Type": "application/json",
@@ -116,22 +162,24 @@ def push_to_vps(model: str, condition: str, vehicles: list[dict]):
 
 
 def main():
-    errors = 0
-    for model in MODELS:
-        for condition in CONDITIONS:
-            try:
-                vehicles = fetch_inventory(model, condition)
-                push_to_vps(model, condition, vehicles)
-            except Exception as e:
-                logger.error(f"[{model}/{condition}] Error: {e}")
-                errors += 1
+    try:
+        all_results = scrape_all()
+    except Exception as e:
+        logger.error(f"Scrape session failed: {e}")
+        sys.exit(1)
 
-            # Small delay between requests
-            import time
-            time.sleep(random.uniform(2.0, 4.0))
+    errors = 0
+    for (model, condition), vehicles in all_results.items():
+        if vehicles is None:
+            errors += 1
+            continue
+        try:
+            push_to_vps(model, condition, vehicles)
+        except Exception as e:
+            logger.error(f"[{model}/{condition}] VPS push failed: {e}")
+            errors += 1
 
     if errors == len(MODELS) * len(CONDITIONS):
-        # Everything failed
         sys.exit(1)
 
 
