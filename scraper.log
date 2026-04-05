@@ -2,3 +2,12 @@
 2026-04-05 18:14:21 ERROR: [my/used] Error: No module named 'curl_cffi'
 2026-04-05 18:14:24 ERROR: [m3/new] Error: No module named 'curl_cffi'
 2026-04-05 18:14:26 ERROR: [m3/used] Error: No module named 'curl_cffi'
+2026-04-05 18:19:32 ERROR: Scrape failed: BrowserType.launch: Executable doesn't exist at /Users/eshanb/Library/Caches/ms-playwright/chromium_headless_shell-1148/chrome-mac/headless_shell
+╔════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just installed or updated.       ║
+║ Please run the following command to download new browsers: ║
+║                                                            ║
+║     playwright install                                     ║
+║                                                            ║
+║ <3 Playwright Team                                         ║
+╚════════════════════════════════════════════════════════════╝

@@ -17,6 +17,7 @@ import urllib.request
 from urllib.parse import quote
 
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 
 # ── Config ────────────────────────────────────────────────────
 VPS_INGEST_URL = os.getenv("VPS_INGEST_URL", "http://db.bhide.au:8080/tesla/api/ingest")
@@ -85,6 +86,7 @@ async def scrape_all() -> dict:
         for model in MODELS:
             for condition in CONDITIONS:
                 page = await context.new_page()
+                await stealth_async(page)
                 api_data = None
 
                 async def handle_response(response):
