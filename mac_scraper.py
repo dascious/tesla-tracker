@@ -17,7 +17,6 @@ import urllib.request
 from urllib.parse import quote
 
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
 
 # ── Config ────────────────────────────────────────────────────
 VPS_INGEST_URL = os.getenv("VPS_INGEST_URL", "http://db.bhide.au:8080/tesla/api/ingest")
@@ -83,10 +82,20 @@ async def scrape_all() -> dict:
             ),
         )
 
+        # Mask headless indicators without needing playwright-stealth
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-AU', 'en'] });
+            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'permissions', {
+                get: () => ({ query: () => Promise.resolve({ state: 'granted' }) })
+            });
+        """)
+
         for model in MODELS:
             for condition in CONDITIONS:
                 page = await context.new_page()
-                await stealth_async(page)
                 api_data = None
 
                 async def handle_response(response):
