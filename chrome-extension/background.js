@@ -79,12 +79,39 @@ async function scrapeOne(model, condition) {
 
     if (result.error) {
       log(`${model}/${condition}: API error — ${result.error} (HTTP ${result.status ?? '?'})`);
-      return;
+      // 412 = Akamai challenge — wait and retry once with a longer delay
+      if (result.status === 412) {
+        log(`${model}/${condition}: 412 — retrying after 8s...`);
+        await sleep(8000);
+        const [retry] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: fetchTeslaInventory,
+          args: [model, condition, MARKET, LANGUAGE, SUPER_REGION],
+        });
+        if (!retry?.result || retry.result.error) {
+          log(`${model}/${condition}: retry also failed — skipping`);
+          return;
+        }
+        Object.assign(result, retry.result);
+      } else {
+        return;
+      }
     }
 
-    const vehicles = result.results ?? [];
-    const total    = result.total_matches_found ?? 0;
+    // Normalise: results can be array or nested object depending on AU inventory size
+    let raw = result.results ?? result.data?.results ?? [];
+    let vehicles = Array.isArray(raw)
+      ? raw
+      : Object.values(raw).filter(v => v && typeof v === 'object');
+
+    if (!Array.isArray(vehicles)) vehicles = [];
+
+    const total = result.total_matches_found ?? result.data?.total_matches_found ?? 0;
     log(`${model}/${condition}: ${vehicles.length} vehicles (AU total: ${total})`);
+    if (vehicles.length === 0 && total > 0) {
+      // Something is off — log raw keys so we can debug
+      log(`${model}/${condition}: WARNING — total=${total} but 0 parsed. result keys:`, Object.keys(result));
+    }
 
     await pushToVPS(model, condition, vehicles);
   } finally {
@@ -165,8 +192,8 @@ function waitForTabLoad(tabId, timeoutMs = 30000) {
       if (id !== tabId || info.status !== 'complete') return;
       clearTimeout(timer);
       chrome.tabs.onUpdated.removeListener(listener);
-      // Extra 2s for Tesla's JS to finish and cookies to be set
-      setTimeout(resolve, 2000);
+      // 4s for Tesla's JS + Akamai's bot-validation to fully complete before we fetch
+      setTimeout(resolve, 4000);
     }
 
     chrome.tabs.onUpdated.addListener(listener);
@@ -177,7 +204,7 @@ function waitForTabLoad(tabId, timeoutMs = 30000) {
       if (tab?.status === 'complete') {
         clearTimeout(timer);
         chrome.tabs.onUpdated.removeListener(listener);
-        setTimeout(resolve, 2000);
+        setTimeout(resolve, 4000);
       }
     });
   });
