@@ -66,13 +66,19 @@ async def scrape_all() -> dict:
     """
     results = {}
 
+    # Persist browser state (cookies, localStorage) between runs.
+    # First run may get blocked; subsequent runs reuse the established session.
+    state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browser_state.json")
+
     async with async_playwright() as pw:
+        # headless=False is required — Tesla detects and blocks headless Chromium.
+        # The window appears briefly (~30s) every 5 minutes then closes automatically.
         browser = await pw.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
-            viewport={"width": 1920, "height": 1080},
+            viewport={"width": 1280, "height": 900},
             locale="en-AU",
             timezone_id="Australia/Sydney",
             user_agent=(
@@ -80,18 +86,11 @@ async def scrape_all() -> dict:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
+            storage_state=state_file if os.path.exists(state_file) else None,
         )
-
-        # Mask headless indicators without needing playwright-stealth
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-AU', 'en'] });
-            window.chrome = { runtime: {} };
-            Object.defineProperty(navigator, 'permissions', {
-                get: () => ({ query: () => Promise.resolve({ state: 'granted' }) })
-            });
-        """)
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined });"
+        )
 
         for model in MODELS:
             for condition in CONDITIONS:
@@ -148,6 +147,13 @@ async def scrape_all() -> dict:
                     results[(model, condition)] = None
                 finally:
                     await page.close()
+
+        # Save cookies/session for next run
+        try:
+            await context.storage_state(path=state_file)
+            logger.info(f"Browser state saved to {state_file}")
+        except Exception as e:
+            logger.warning(f"Could not save browser state: {e}")
 
         await browser.close()
 
