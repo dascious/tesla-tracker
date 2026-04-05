@@ -8,7 +8,7 @@ import random
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request, Query
+from fastapi import FastAPI, Request, Query, Header, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -74,8 +74,11 @@ async def lifespan(app: FastAPI):
     global scraper_task
     database.init_db()
     logger.info("Database initialized")
-    scraper_task = asyncio.create_task(scraper_loop())
-    logger.info("Scraper background task created")
+    if config.SCRAPER_ENABLED:
+        scraper_task = asyncio.create_task(scraper_loop())
+        logger.info("Scraper background task created")
+    else:
+        logger.info("Scraper disabled — running in ingest-only mode (Mac Mini pushes data)")
     yield
     if scraper_task:
         scraper_task.cancel()
@@ -163,6 +166,45 @@ async def api_scrape_now():
         })
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+# ── Ingest endpoint (called by Mac Mini scraper) ────────────
+@sub_app.post("/api/ingest")
+async def api_ingest(payload: dict, x_ingest_token: str = Header(None)):
+    """
+    Receives scraped listings from the Mac Mini scraper.
+    Requires X-Ingest-Token header matching INGEST_TOKEN in config.
+    """
+    if config.INGEST_TOKEN and x_ingest_token != config.INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid ingest token")
+
+    vehicles = payload.get("vehicles", [])
+    model = payload.get("model", "")
+    condition = payload.get("condition", "")
+    active_vins_list = payload.get("active_vins", [])
+
+    new_listings = []
+    for v in vehicles:
+        is_new = database.upsert_listing(v, model, condition)
+        if is_new:
+            vin = v.get("VIN", "")
+            v["_model_code"] = model
+            v["_condition"] = condition
+            v["_listing_url"] = f"https://www.tesla.com/en_AU/{condition}/{model}/order/{vin}"
+            new_listings.append(v)
+
+    database.mark_gone(set(active_vins_list), model, condition)
+    database.log_scrape(model, condition, "success", len(vehicles), len(new_listings))
+
+    if new_listings:
+        logger.info(f"Ingest: {len(new_listings)} new listings [{model}/{condition}] — notifying")
+        await notifier.notify_new_listings(new_listings)
+
+    return JSONResponse({
+        "status": "ok",
+        "received": len(vehicles),
+        "new": len(new_listings),
+    })
 
 
 # ── Entry point ──────────────────────────────────────────────

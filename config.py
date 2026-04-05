@@ -56,6 +56,15 @@ WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 BASE_PATH = os.getenv("BASE_PATH", "/tesla")  # subpath for reverse proxy
 
+# ── Deployment mode ──────────────────────────────────────────
+# Set SCRAPER_ENABLED=false on VPS when Mac Mini is doing the scraping.
+# Mac Mini should set SCRAPER_ENABLED=true (or omit, default is true).
+SCRAPER_ENABLED = os.getenv("SCRAPER_ENABLED", "true").lower() == "true"
+
+# Secret token for the /api/ingest endpoint.
+# Must match on both VPS and Mac Mini. Generate with: openssl rand -hex 32
+INGEST_TOKEN = os.getenv("INGEST_TOKEN", "")
+
 # ── Proxy (needed for VPS/datacenter IPs) ───────────────────
 # Tesla blocks datacenter IPs. Route through a residential proxy.
 # Format: http://user:pass@host:port  or  socks5://user:pass@host:port

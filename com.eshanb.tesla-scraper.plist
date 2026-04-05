@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.eshanb.tesla-scraper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/eshanb/workspace/projects/tesla-tracker/mac_scraper.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/eshanb/workspace/projects/tesla-tracker</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VPS_INGEST_URL</key>
+        <string>http://db.bhide.au:8080/tesla/api/ingest</string>
+        <key>INGEST_TOKEN</key>
+        <string>REPLACE_WITH_YOUR_TOKEN</string>
+        <key>TESLA_ZIP</key>
+        <string>2759</string>
+        <key>TESLA_MARKET</key>
+        <string>AU</string>
+    </dict>
+
+    <!-- Run every 5 minutes -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/eshanb/workspace/projects/tesla-tracker/scraper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/eshanb/workspace/projects/tesla-tracker/scraper.log</string>
+</dict>
+</plist>
