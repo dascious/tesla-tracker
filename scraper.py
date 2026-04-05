@@ -1,7 +1,8 @@
 """
-Tesla Inventory scraper using Playwright.
-Uses a real headless browser to bypass Akamai Bot Manager,
-then intercepts the inventory API responses.
+Tesla Inventory scraper using curl-cffi.
+Impersonates Chrome's TLS fingerprint for direct API calls — no browser needed.
+Works on residential IPs (Mac, home server) natively.
+On VPS/datacenter IPs, set PROXY_URL in .env to route through a residential proxy.
 """
 import asyncio
 import json
@@ -9,16 +10,12 @@ import random
 import logging
 from urllib.parse import quote
 
-from playwright.async_api import async_playwright, Browser, BrowserContext
+from curl_cffi.requests import AsyncSession
 
 import config
 import database
 
 logger = logging.getLogger("tesla-tracker.scraper")
-
-# Persistent browser instance (reused across scrape cycles)
-_browser: Browser | None = None
-_context: BrowserContext | None = None
 
 
 def _build_query(model: str, condition: str) -> dict:
@@ -43,94 +40,50 @@ def _build_query(model: str, condition: str) -> dict:
     }
 
 
-async def _get_browser() -> BrowserContext:
-    """Get or create a persistent browser context."""
-    global _browser, _context
-
-    if _browser and _browser.is_connected():
-        return _context
-
-    logger.info("Launching headless browser...")
-    pw = await async_playwright().start()
-    _browser = await pw.chromium.launch(
-        headless=True,
-        args=[
-            "--disable-blink-features=AutomationControlled",
-            "--no-sandbox",
-        ],
-    )
-    _context = await _browser.new_context(
-        viewport={"width": 1920, "height": 1080},
-        locale="en-AU",
-        timezone_id="Australia/Sydney",
-        user_agent=(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/125.0.0.0 Safari/537.36"
-        ),
-    )
-    logger.info("Browser launched successfully")
-    return _context
-
-
 async def fetch_inventory(model: str, condition: str) -> list[dict]:
     """
-    Fetch inventory by navigating to the Tesla inventory page
-    and intercepting the API response.
+    Fetch inventory via direct API call, impersonating Chrome's TLS fingerprint.
     """
-    context = await _get_browser()
-    page = await context.new_page()
+    query = _build_query(model, condition)
+    query_str = quote(json.dumps(query, separators=(",", ":")))
+    url = f"{config.TESLA_API_URL}?query={query_str}"
 
-    api_data = None
-    api_error = None
+    headers = {
+        "Accept": "application/json",
+        "Accept-Language": "en-AU,en;q=0.9",
+        "Referer": f"https://www.tesla.com/en_AU/inventory/{condition}/{model}",
+        "sec-ch-ua": '"Chromium";v="125", "Google Chrome";v="125", "Not.A/Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+    }
 
-    async def handle_response(response):
-        nonlocal api_data, api_error
-        if "/inventory/api/" in response.url and "inventory-results" in response.url:
-            try:
-                if response.status == 200:
-                    api_data = await response.json()
-                else:
-                    api_error = f"HTTP {response.status}"
-            except Exception as e:
-                api_error = str(e)
+    proxy = config.PROXY_URL or None
 
-    page.on("response", handle_response)
+    async with AsyncSession(impersonate="chrome125") as session:
+        response = await session.get(
+            url,
+            headers=headers,
+            proxy=proxy,
+            timeout=30,
+        )
 
-    try:
-        url = f"https://www.tesla.com/en_AU/inventory/{condition}/{model}?arrangeby=plh&zip={config.ZIP_CODE}&range=0"
-        logger.info(f"[{model}/{condition}] Navigating to {url}")
+    if response.status_code != 200:
+        raise Exception(f"HTTP {response.status_code}")
 
-        await page.goto(url, wait_until="networkidle", timeout=45000)
+    # Check we got JSON not a challenge page
+    content_type = response.headers.get("content-type", "")
+    if "json" not in content_type:
+        preview = response.text[:120].replace("\n", " ")
+        raise Exception(f"Got non-JSON response ({content_type}): {preview}")
 
-        # Give a moment for any late API responses
-        await asyncio.sleep(2)
-
-        if api_error:
-            raise Exception(f"API returned error: {api_error}")
-
-        if api_data is None:
-            # Fallback: try hitting the API directly using page cookies/session
-            logger.info(f"[{model}/{condition}] No intercepted response, trying direct API call via page")
-            query = _build_query(model, condition)
-            query_str = quote(json.dumps(query))
-            api_url = f"{config.TESLA_API_URL}?query={query_str}"
-
-            resp = await page.evaluate(f"""
-                async () => {{
-                    const resp = await fetch("{api_url}");
-                    return await resp.json();
-                }}
-            """)
-            api_data = resp
-
-        results = api_data.get("results", [])
-        total = api_data.get("total_matches_found", 0)
-        logger.info(f"[{model}/{condition}] Got {len(results)} results (total_matches: {total})")
-        return results
-
-    finally:
-        await page.close()
+    data = response.json()
+    results = data.get("results", [])
+    total = data.get("total_matches_found", 0)
+    logger.info(f"[{model}/{condition}] {len(results)} results (total: {total})")
+    return results
 
 
 async def scrape_once() -> list[dict]:
@@ -167,20 +120,9 @@ async def scrape_once() -> list[dict]:
                 logger.error(f"[{model}/{condition}] Error: {e}")
                 database.log_scrape(model, condition, "error", error=str(e))
 
-            # Random delay between page loads to look human
-            await asyncio.sleep(random.uniform(3.0, 7.0))
+            await asyncio.sleep(random.uniform(2.0, 5.0))
 
     return all_new
-
-
-async def shutdown_browser():
-    """Clean up browser on app shutdown."""
-    global _browser, _context
-    if _browser:
-        await _browser.close()
-        _browser = None
-        _context = None
-        logger.info("Browser closed")
 
 
 def get_randomized_interval() -> int:
@@ -188,3 +130,8 @@ def get_randomized_interval() -> int:
     base = config.SCRAPE_INTERVAL_SECONDS
     jitter = base * 0.3
     return int(random.uniform(base - jitter, base + jitter))
+
+
+async def shutdown_browser():
+    """No-op — kept for compatibility with main.py."""
+    pass

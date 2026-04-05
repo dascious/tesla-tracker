@@ -56,5 +56,11 @@ WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("WEB_PORT", "8080"))
 BASE_PATH = os.getenv("BASE_PATH", "/tesla")  # subpath for reverse proxy
 
+# ── Proxy (needed for VPS/datacenter IPs) ───────────────────
+# Tesla blocks datacenter IPs. Route through a residential proxy.
+# Format: http://user:pass@host:port  or  socks5://user:pass@host:port
+# Leave blank if running on a residential IP (home, Mac Mini, etc.)
+PROXY_URL = os.getenv("PROXY_URL", "")
+
 # ── Database ─────────────────────────────────────────────────
 DB_PATH = os.getenv("DB_PATH", "tesla_inventory.db")
