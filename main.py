@@ -85,12 +85,12 @@ async def lifespan(app: FastAPI):
 
 
 # Sub-application mounted at /tesla
-sub_app = FastAPI(title="Tesla Inventory Tracker", lifespan=lifespan)
+sub_app = FastAPI(title="Tesla Inventory Tracker")
 sub_app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
 # Root app that mounts sub_app at the configured base path
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.mount(config.BASE_PATH, sub_app)
 
 
