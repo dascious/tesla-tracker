@@ -57,13 +57,26 @@ async function runScrape() {
 }
 
 async function scrapeOne(model, condition) {
-  // Open a background tab on the Tesla inventory page.
-  // Using the real page URL ensures Tesla sets/refreshes all cookies before our fetch().
+  // For used inventory Akamai is stricter — warm up on the main inventory page first
+  if (condition === 'used') {
+    const warmup = await chrome.tabs.create({
+      url: 'https://www.tesla.com/en_AU/inventory',
+      active: false,
+    });
+    await waitForTabLoad(warmup.id, 20000);
+    await sleep(3000);
+    try { chrome.tabs.remove(warmup.id); } catch {}
+    await sleep(2000);
+  }
+
   const url = `https://www.tesla.com/en_AU/inventory/${condition}/${model}?arrangeby=plh&range=0`;
   const tab = await chrome.tabs.create({ url, active: false });
 
   try {
     await waitForTabLoad(tab.id, 35000);
+
+    // Used inventory needs extra settle time for Akamai to fully validate
+    if (condition === 'used') await sleep(5000);
 
     // Execute the fetch INSIDE the tab — uses Chrome's real cookies + fingerprint
     const [{ result }] = await chrome.scripting.executeScript({
@@ -98,19 +111,32 @@ async function scrapeOne(model, condition) {
       }
     }
 
-    // Normalise: results can be array or nested object depending on AU inventory size
-    let raw = result.results ?? result.data?.results ?? [];
-    let vehicles = Array.isArray(raw)
-      ? raw
-      : Object.values(raw).filter(v => v && typeof v === 'object');
+    // Normalise vehicles — Tesla's response structure varies
+    let vehicles = [];
+    const raw = result.results ?? result.data?.results ?? [];
 
-    if (!Array.isArray(vehicles)) vehicles = [];
+    if (Array.isArray(raw)) {
+      // Standard case: results is an array of vehicle dicts
+      vehicles = raw.filter(v => v && typeof v === 'object' && !Array.isArray(v));
+    } else if (raw && typeof raw === 'object') {
+      // Non-standard: results is an object — dig one level deeper
+      // Values could be vehicle dicts OR arrays of vehicle dicts
+      for (const val of Object.values(raw)) {
+        if (Array.isArray(val)) {
+          vehicles.push(...val.filter(v => v && typeof v === 'object' && !Array.isArray(v) && v.VIN));
+        } else if (val && typeof val === 'object' && val.VIN) {
+          vehicles.push(val);
+        }
+      }
+    }
 
     const total = result.total_matches_found ?? result.data?.total_matches_found ?? 0;
     log(`${model}/${condition}: ${vehicles.length} vehicles (AU total: ${total})`);
-    if (vehicles.length === 0 && total > 0) {
-      // Something is off — log raw keys so we can debug
-      log(`${model}/${condition}: WARNING — total=${total} but 0 parsed. result keys:`, Object.keys(result));
+
+    // Log structure if something looks off
+    if (vehicles.length === 0 || !vehicles[0]?.VIN) {
+      log(`${model}/${condition}: DEBUG — result keys: ${Object.keys(result)}, raw type: ${Array.isArray(raw) ? 'array' : typeof raw}, raw length/keys: ${Array.isArray(raw) ? raw.length : Object.keys(raw).length}`);
+      if (vehicles.length > 0) log(`${model}/${condition}: first item keys: ${Object.keys(vehicles[0])}`);
     }
 
     await pushToVPS(model, condition, vehicles);
